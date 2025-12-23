@@ -1,9 +1,9 @@
 # Road Defect Detection with Edge AI and IoT
 ### Requirements: 
-Azure Account
-Virtual Machine hosted in Azure (with Ubuntu Image)
-Install Node.js & npm 
-Platform.IO in VSCode
+-Azure Account
+-Virtual Machine hosted in Azure (with Ubuntu Image)
+-Install Node.js & npm 
+-Platform.IO in VSCode
 
 
 ### To upload to ESP32-CAM 
