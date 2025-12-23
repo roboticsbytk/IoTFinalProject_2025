@@ -16,6 +16,8 @@ Platform.IO in VSCode
 - Connect to your Azure VM instance by typing this in the terminal 
 ⋅⋅⋅⋅* ssh admin1234@XX.XX.XX.XXX 
 - Then enter your password. You should see username@IoTAzureNodeRed
+- ![VM screenshot](VM.png)
+
 
 The public IP address can be obtained once you press Connect in the Overview Tab. It will open a tab with the 
 exact Public IP address.
@@ -30,5 +32,8 @@ exact Public IP address.
 
 - For table dashboard
  ⋅⋅⋅⋅* http:/XX.XX.XX.XXX:1880/dashboard/page1
+![Table Dashboard](table.png)
+
 - For map
 ⋅⋅⋅⋅* http:/XX.XX.XX.XXX:1880/worldmap/
+![Worldmap Dashboard](map.png)
