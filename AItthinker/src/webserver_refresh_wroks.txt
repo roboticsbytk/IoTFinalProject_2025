@@ -1,0 +1,140 @@
+#include "esp_camera.h"
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+
+// Select your camera model
+#define CAMERA_MODEL_AI_THINKER
+#include "camera_pins.h"
+#define LED_PIN 4 
+// Wi-Fi credentials
+const char* ssid = "Aroosh 1st Floor";
+const char* password = "aroosh0000";
+
+// Async server and event source
+AsyncWebServer server(80);
+AsyncEventSource events("/events");
+
+unsigned long lastTime = 0;
+unsigned long timerDelay = 10000; // 10 seconds
+
+// Capture handler: returns a single JPEG
+void handleCapture(AsyncWebServerRequest *request) {
+  camera_fb_t * fb = esp_camera_fb_get();
+  if (!fb) {
+    request->send(500, "text/plain", "Camera capture failed");
+    return;
+  }
+  AsyncWebServerResponse *response = request->beginResponse_P(200, "image/jpeg", fb->buf, fb->len);
+  response->addHeader("Content-Disposition", "inline; filename=capture.jpg");
+  request->send(response);
+  esp_camera_fb_return(fb);
+}
+
+// Root page with auto-refresh via SSE
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML><html>
+<head>
+  <title>ESP32 Camera SSE</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+  <h2>ESP32 Camera Still Capture (Async SSE)</h2>
+  <img id="photo" src="/capture" style="max-width:100%; height:auto;"/>
+  <p id="status"></p>
+<script>
+if (!!window.EventSource) {
+  var source = new EventSource('/events');
+  source.addEventListener('photo', function(e) {
+    var img = document.getElementById("photo");
+    img.src = "/capture?rand=" + new Date().getTime();
+    document.getElementById("status").innerHTML = "Last updated: " + new Date().toLocaleTimeString();
+  }, false);
+}
+</script>
+</body>
+</html>)rawliteral";
+
+void initCamera() {
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sccb_sda = SIOD_GPIO_NUM;
+  config.pin_sccb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+  config.frame_size = FRAMESIZE_QVGA; // 320x240
+  config.pixel_format = PIXFORMAT_JPEG;
+  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+  config.fb_location = CAMERA_FB_IN_PSRAM;
+  config.jpeg_quality = 15;
+  config.fb_count = 1;
+
+  if (psramFound()) {
+    config.fb_count = 2;
+    config.grab_mode = CAMERA_GRAB_LATEST;
+  }
+
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Camera init failed with error 0x%x", err);
+    return;
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  initCamera();
+
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected");
+  Serial.print("Camera Ready! Use 'http://");
+  Serial.print(WiFi.localIP());
+  Serial.println("' to connect");
+
+  // Serve root page
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", index_html);
+  });
+
+  // Serve capture endpoint
+  server.on("/capture", HTTP_GET, handleCapture);
+
+  // SSE events
+  events.onConnect([](AsyncEventSourceClient *client){
+    Serial.println("Client connected to /events");
+  });
+  server.addHandler(&events);
+
+  server.begin();
+  pinMode(LED_PIN, OUTPUT);
+}
+
+void loop() {
+  if ((millis() - lastTime) > timerDelay) {
+    // Send SSE event every 10 seconds
+    events.send("update", "photo", millis());
+    lastTime = millis();
+  // }
+  // digitalWrite(LED_PIN, HIGH);   // Turn LED ON
+  // delay(1000);                   // Wait 1 second
+  // digitalWrite(LED_PIN, LOW);    // Turn LED OFF
+  // delay(1000);                   // Wait 1 second
+}

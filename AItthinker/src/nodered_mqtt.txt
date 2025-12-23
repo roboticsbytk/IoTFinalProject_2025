@@ -1,0 +1,214 @@
+#include "esp_camera.h"
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>   // Add ArduinoJson library
+
+// Select your camera model
+#define CAMERA_MODEL_AI_THINKER
+#include "camera_pins.h"
+
+#define LED_PIN 4   // onboard flash LED
+
+// Wi-Fi credentials
+const char* ssid = "Aroosh 1st Floor";
+const char* password = "aroosh0000";
+
+// MQTT broker details
+const char* mqtt_server = "n12a20fa.ala.asia-southeast1.emqxsl.com";
+const int mqtt_port = 8883;
+
+
+// CA certificate from EMQX broker
+const char* ca_cert = R"EOF(
+-----BEGIN CERTIFICATE-----
+MIIDjjCCAnagAwIBAgIQAzrx5qcRqaC7KGSxHQn65TANBgkqhkiG9w0BAQsFADBh
+MQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3
+d3cuZGlnaWNlcnQuY29tMSAwHgYDVQQDExdEaWdpQ2VydCBHbG9iYWwgUm9vdCBH
+MjAeFw0xMzA4MDExMjAwMDBaFw0zODAxMTUxMjAwMDBaMGExCzAJBgNVBAYTAlVT
+MRUwEwYDVQQKEwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5j
+b20xIDAeBgNVBAMTF0RpZ2lDZXJ0IEdsb2JhbCBSb290IEcyMIIBIjANBgkqhkiG
+9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuzfNNNx7a8myaJCtSnX/RrohCgiN9RlUyfuI
+2/Ou8jqJkTx65qsGGmvPrC3oXgkkRLpimn7Wo6h+4FR1IAWsULecYxpsMNzaHxmx
+1x7e/dfgy5SDN67sH0NO3Xss0r0upS/kqbitOtSZpLYl6ZtrAGCSYP9PIUkY92eQ
+q2EGnI/yuum06ZIya7XzV+hdG82MHauVBJVJ8zUtluNJbd134/tJS7SsVQepj5Wz
+tCO7TG1F8PapspUwtP1MVYwnSlcUfIKdzXOS0xZKBgyMUNGPHgm+F6HmIcr9g+UQ
+vIOlCsRnKPZzFBQ9RnbDhxSJITRNrw9FDKZJobq7nMWxM4MphQIDAQABo0IwQDAP
+BgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBhjAdBgNVHQ4EFgQUTiJUIBiV
+5uNu5g/6+rkS7QYXjzkwDQYJKoZIhvcNAQELBQADggEBAGBnKJRvDkhj6zHd6mcY
+1Yl9PMWLSn/pvtsrF9+wX3N3KjITOYFnQoQj8kVnNeyIv/iPsGEMNKSuIEyExtv4
+NeF22d+mQrvHRAiGfzZ0JFrabA0UWTW98kndth/Jsw1HKj2ZL7tcu7XUIOGZX1NG
+Fdtom/DzMNU+MeKNhJ7jitralj41E6Vf8PlwUHBHQRFXGU7Aj64GxJUTFy8bJZ91
+8rGOmaFvE7FBcf6IKshPECBV1/MUReXgRPTqh5Uykw7+U0b6LJ3/iyK5S9kJRaTe
+pLiaWN0bfVKfjllDiIGknibVb63dDcY3fe0Dkhvld1927jyNxF1WW6LZZm6zNTfl
+MrY=
+-----END CERTIFICATE-----
+)EOF";
+
+
+WiFiClientSecure net;
+PubSubClient client(net);
+
+// Async server and event source
+AsyncWebServer server(80);
+AsyncEventSource events("/events");
+
+unsigned long lastTime = 0;
+unsigned long timerDelay = 10000; // 10 seconds
+
+// Capture handler: returns a single JPEG
+void handleCapture(AsyncWebServerRequest *request) {
+  camera_fb_t * fb = esp_camera_fb_get();
+  if (!fb) {
+    request->send(500, "text/plain", "Camera capture failed");
+    return;
+  }
+  AsyncWebServerResponse *response = request->beginResponse_P(200, "image/jpeg", fb->buf, fb->len);
+  response->addHeader("Content-Disposition", "inline; filename=capture.jpg");
+  request->send(response);
+  esp_camera_fb_return(fb);
+}
+
+// Root page with auto-refresh via SSE
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML><html>
+<head>
+  <title>ESP32 Camera SSE</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+  <h2>ESP32 Camera Still Capture (Async SSE)</h2>
+  <img id="photo" src="/capture" style="max-width:100%; height:auto;"/>
+  <p id="status"></p>
+<script>
+if (!!window.EventSource) {
+  var source = new EventSource('/events');
+  source.addEventListener('photo', function(e) {
+    var img = document.getElementById("photo");
+    img.src = "/capture?rand=" + new Date().getTime();
+    document.getElementById("status").innerHTML = "Last updated: " + new Date().toLocaleTimeString();
+  }, false);
+}
+</script>
+</body>
+</html>)rawliteral";
+
+void initCamera() {
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sccb_sda = SIOD_GPIO_NUM;
+  config.pin_sccb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+  config.frame_size = FRAMESIZE_QVGA;
+  config.pixel_format = PIXFORMAT_JPEG;
+  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+  config.fb_location = CAMERA_FB_IN_PSRAM;
+  config.jpeg_quality = 15;
+  config.fb_count = 1;
+
+  if (psramFound()) {
+    config.fb_count = 2;
+    config.grab_mode = CAMERA_GRAB_LATEST;
+  }
+
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Camera init failed with error 0x%x", err);
+    return;
+  }
+}
+
+void reconnectMQTT() {
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    if (client.connect("ESP32CAMClient", "test", "1234")) {
+      Serial.println("connected");
+      // client.publish("road_defect/esp32/out", "ESP32-CAM connected!");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      delay(5000);
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  initCamera();
+
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected");
+  Serial.print("Camera Ready! Use 'http://");
+  Serial.print(WiFi.localIP());
+  Serial.println("' to connect");
+
+  // MQTT setup
+  net.setCACert(ca_cert);
+  client.setServer(mqtt_server, mqtt_port);
+
+  // Web server setup
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", index_html);
+  });
+  server.on("/capture", HTTP_GET, handleCapture);
+  events.onConnect([](AsyncEventSourceClient *client){
+    Serial.println("Client connected to /events");
+  });
+  server.addHandler(&events);
+  server.begin();
+
+  pinMode(LED_PIN, OUTPUT);
+}
+
+void loop() {
+  if (!client.connected()) {
+    reconnectMQTT();
+  }
+  client.loop();
+
+  // SSE + MQTT publish every 10s
+  if ((millis() - lastTime) > timerDelay) {
+    events.send("update", "photo", millis());
+    lastTime = millis();
+
+    // Build JSON payload
+    StaticJsonDocument<200> doc;
+    doc["road_defect"] = "defect";   // or "no defect"
+    JsonObject gps = doc.createNestedObject("GPS_coordinates");
+    gps["latitude"] = 33.6844;       // random value
+    gps["longitude"] = 73.0479;      // random value
+
+    // Add timestamp (epoch seconds)
+    doc["timestamp"] = millis() / 1000;   // or use time() if NTP is configured
+
+    char buffer[256];
+    size_t n = serializeJson(doc, buffer);
+
+    // Publish JSON payload
+    client.publish("road_defect/esp32/out", buffer, n);
+
+    Serial.println("Published JSON:");
+    Serial.println(buffer);
+  }
+}
